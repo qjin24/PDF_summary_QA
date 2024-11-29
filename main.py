@@ -51,32 +51,38 @@ class PDFProcessor:
     def translate_text(self, text: str, from_lang: str, to_lang: str) -> str:
         """텍스트 번역"""
         try:
-            # 영어 단어/약어 패턴 (가장 긴 매치를 우선으로)
-            eng_pattern = r'[A-Z]{2,}|[A-Z][a-z]+(?:\s*[A-Z][a-z]+)*|[A-Za-z]+(?:-[A-Za-z]+)*'
+            # 특수문자 및 줄바꿈 정리
+            text = self.clean_text(text)
             
-            # 텍스트에서 영어 단어/약어 찾기 및 작은따옴표로 감싸기
-            modified_text = text
-            matches = list(re.finditer(eng_pattern, text))
+            # 영어 단어/약어 패턴
+            eng_pattern = r'[A-Z][A-Za-z]*(?:-[A-Za-z]+)*|[A-Z]{2,}(?:-[A-Z]+)*'
             
-            # 뒤에서부터 처리
-            for match in reversed(matches):
+            # 전문용어/약어 찾기
+            special_terms = set()
+            matches = re.finditer(eng_pattern, text)
+            for match in matches:
                 word = match.group()
-                modified_text = (
-                    modified_text[:match.start()] + 
-                    f"'{word}'" + 
-                    modified_text[match.end():]
-                )
+                if (len(word) >= 2 and (word.isupper() or '-' in word or 
+                    (word[0].isupper() and any(c.isupper() for c in word[1:])))):
+                    special_terms.add(word)
+            
+            # 긴 단어부터 처리 (부분 매칭 방지)
+            modified_text = text
+            for term in sorted(special_terms, key=len, reverse=True):
+                modified_text = modified_text.replace(term, f"'{term}'")
             
             # NLLB 번역
             lang_map = {'ko': 'kor_Hang', 'en': 'eng_Latn'}
             from_code = lang_map[from_lang]
             to_code = lang_map[to_lang]
             
-            inputs = self.translator_tokenizer(modified_text, 
-                                             return_tensors="pt", 
-                                             padding=True, 
-                                             truncation=True,
-                                             max_length=512)
+            inputs = self.translator_tokenizer(
+                modified_text,
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True,
+                max_length=512
+            )
             
             translated = self.translator.generate(
                 **inputs,
@@ -87,10 +93,15 @@ class PDFProcessor:
                 early_stopping=True
             )
             
-            result = self.translator_tokenizer.batch_decode(translated, skip_special_tokens=True)[0]
+            result = self.translator_tokenizer.batch_decode(
+                translated, 
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True
+            )[0].strip()
             
-            # 결과에서 작은따옴표 제거
-            result = result.replace("'", "")
+            # 결과 정리
+            result = result.replace("'", "").replace('"', "")
+            result = re.sub(r'\s+', ' ', result).strip()
             
             print(f"번역 - 원문: {text}")
             print(f"번역 - 수정된 입력: {modified_text}")
@@ -114,6 +125,15 @@ class PDFProcessor:
         finally:
             doc.close()
 
+    def clean_text(self, text: str) -> str:
+        """텍스트 정리"""
+        # 줄바꿈 및 하이픈으로 나뉜 단어 처리
+        text = re.sub(r'-\n', '', text)
+        text = re.sub(r'\n', ' ', text)
+        # 여러 개의 공백을 하나로
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
     def prepare_qa_embeddings(self, doc):
         """QA를 위한 전체 PDF 내용의 임베딩 준비"""
         print("\n전체 문장 추출 중...")
@@ -126,6 +146,8 @@ class PDFProcessor:
         
         for page in doc:
             text = page.get_text()
+            # 텍스트 정리
+            text = self.clean_text(text)
             sentences = text.split('. ')
             for sentence in sentences:
                 sentence = sentence.strip()
@@ -157,7 +179,7 @@ class PDFProcessor:
             for idx in top_indices:
                 similarity = similarities[idx]
                 if similarity > 0.3:
-                    content = self.sentences[idx]
+                    content = self.clean_text(self.sentences[idx])
                     if self.is_english_pdf:
                         translated_content = self.translate_text(content, 'en', 'ko')
                         result += f"[유사도: {similarity:.3f}]\n"
@@ -276,7 +298,7 @@ class PDFProcessor:
                     continue
 
             def summarize_chunk(text: str, chunk_num: int) -> str:
-                """청크 요약 함수"""
+                """��크 요약 함수"""
                 try:
                     # 입력 텍스트가 너무 짧으면 그대로 반환
                     if len(text.split()) < 50:
@@ -333,7 +355,7 @@ class PDFProcessor:
             return "처리 오류", [("오류", "PDF를 처리할 수 없습니다.")]
 
 def process_pdf_and_prepare_qa(pdf_file) -> Tuple[str, str, str]:
-    """PDF 처리: 요약 및 QA 준비를 동시에 수행"""
+    """PDF 리: 요약 및 QA 준비를 동시에 수행"""
     if pdf_file is None:
         return "", "", ""
     
@@ -407,4 +429,3 @@ def create_interface():
 if __name__ == "__main__":
     demo = create_interface()
     demo.launch()
-
